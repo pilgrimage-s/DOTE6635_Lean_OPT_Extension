@@ -1,71 +1,294 @@
-### LLM for Large-Scale Optimization Model Auto-Formulation: A Lightweight Few-Shot Learning Approach
+# Pure Ollama Orchestrator Workflow
 
-#### Project Overview
-Large-scale optimization is a key backbone in modern business decision-making. However, the process of building these models is often labor-intensive and time-consuming. We address this by proposing a multi-agent framework LEAN-LLM-OPT, which takes a query (a problem description and associated datasets) as input and orchestrates a team of LLM agents to output the optimization formulation. LEAN-LLM-OPT innovatively applies few-shot learning to teach LLM agents how they could effectively apply reasoning and customized tools to build optimization models in our benchmark Large-scale-or and a Singapore Airlines choice-based revenue management use case.
+This note documents the current workflow in `LEAN_LLM_OPT_pure_ollama_Large-scale-or.ipynb` after adding the lightweight Orchestrator layer.
 
-This repository accompanies the paper: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5329027
+## Scope
 
-#### Directory Structure
+The notebook is a pure Ollama version of the Large-Scale-OR pipeline. It keeps the original LEAN-LLM-OPT notebook structure and adds a post-generation Orchestrator. It does not split the notebook into new Python modules.
 
-1. **Large_Scale_Or_Files/**  
-   - Contains all required Ref-Data files for further experiments.
+Models used by default:
 
-2. **Test_Dataset/**  
-   - Contains test datasets, including:
-     - Air_NRM (Singapore Airlines use case)  
-     - Large-scale-or (101 benchmarks)  
-     - Small-scale Benchmarks
+- Generation/review model: `gpt-oss:20b`
+- Embedding model: `embeddinggemma`
+- Ollama endpoint: `http://localhost:11434`
 
-3. **Results/**  
-   - Contains all numerical results in the paper
+These can be overridden with:
 
-4. **Ablation_Study_Air_NRM_Few-shot_Only.ipynb**  
-   - A Jupyter notebook conducting ablation studies in a few-shot-only setting for the Air_NRM use case.
-  
-5. **Ablation_Study_Air_NRM_RAG_Only.ipynb**  
-   - Another ablation study focusing on RAG-Only setting for the Air_NRM use case.
-
-6. **LEAN_LLM_OPT_4.1_Air_NRM.ipynb**  
-   - Implements the LEAN-LLM-OPT framework based on GPT-4.1 for the Air_NRM scenario.
-
-7. **LEAN_LLM_OPT_gpt_oss_20b_Air_NRM.ipynb**  
-   - Implements the LEAN-LLM-OPT framework based on gpt-oss-20b for the Air_NRM scenario.
-
-8. **LEAN_LLM_OPT_4.1_Large-scale-or.ipynb**  
-   - Implements the LEAN-LLM-OPT framework based on GPT-4.1 for large-scale and small-scale experiments.
-
-9. **LEAN_LLM_OPT_gpt_oss_20b_Large-scale-or.ipynb**  
-   - Implements the LEAN-LLM-OPT framework based on gpt-oss-20b for large-scale and small-scale experiments.
-
-10. **README.md**  
-   - The current project description (this file).
-
-11. **requirements.txt**  
-   - Lists required Python packages.  
-#### Installation
-Prerequisites:
-- Python 3.10 or higher
-- Recommended environment: Conda or virtualenv
-
-#### Usage Instructions
-1. Clone the repository
 ```bash
-gh repo clone CoraLiang01/lean-llm-opt
+export OLLAMA_BASE_URL="http://localhost:11434"
+export OLLAMA_LLM_MODEL="gpt-oss:20b"
+export OLLAMA_EMBED_MODEL="embeddinggemma"
 ```
-2. Navigate to the Project Directory & Install Dependencies
+
+## Relationship To `Plan.md`
+
+`Plan.md` describes the original LEAN-LLM-OPT framework as a three-agent process:
+
+1. Classification Agent
+2. Workflow Generation Agent
+3. Model Generation Agent
+
+The pure Ollama notebook preserves that overall idea but keeps the implementation notebook-native:
+
+- Classification is handled by `classify_problem`.
+- Type-specific workflow and retrieval logic are embedded inside `get_NRM_response`, `get_RA_response`, `get_TP_response`, `get_FLP_response`, `get_AP_response`, `get_Others_response`, and `get_others_without_CSV_response`.
+- Code generation is handled by `get_code`.
+- The new Orchestrator is a fourth post-generation layer that reviews and optionally revises the generated model/code.
+
+The main intentional difference from `Plan.md` is that the notebook does not introduce a separate pre-generation Workflow Agent abstraction. This avoids a large refactor and matches the current implementation strategy: keep the existing generation branches, then add model/code validation and at most one correction round afterward.
+
+## End-To-End Workflow
+
+For each row in `Test_Dataset/Large-scale-or/Large-scale-or-101.csv`:
+
+1. Read `Query` and optional `Dataset_address`.
+2. If a dataset exists, classify the problem with `classify_problem`.
+3. Route the instance to the matching branch:
+   - NRM: `get_NRM_response`
+   - RA: `get_RA_response`
+   - TP: `get_TP_response`
+   - FLP/UFLP: `get_FLP_response`
+   - AP: `get_AP_response`
+   - Others with CSV: `get_Others_response`
+   - Others without CSV: `get_others_without_CSV_response`
+4. Generate the initial mathematical model.
+5. Generate initial Gurobi code with `get_code`, except for `Others with CSV` when `get_Others_response` already returns Python/Gurobi code.
+6. Run `orchestrate_generation`.
+7. Save both initial and final outputs to `Large-scale-or-Lean-Ollama-20b-orchestrated.csv`.
+
+## Orchestrator Steps
+
+The Orchestrator is implemented in the notebook cell titled:
+
 ```python
-cd lean-llm-opt
-pip install -r requirements.txt
+# Lightweight post-generation Orchestrator for the pure Ollama pipeline.
 ```
 
-3. Run Jupyter Notebooks
-- Open any of the provided notebooks (e.g., Ablation_Study_Air_NRM_Few-shot_Only.ipynb) to explore experiments or replicate results.
+Important configuration:
 
-#### Acknowledgements
-Special thanks to:
-- Singapore Airlines: For providing simulated datasets and supporting the case study.
+```python
+ORCH_MAX_REFINEMENTS = 1
+ORCH_ENABLE_CODE_EXECUTION = True
+ORCH_REVIEW_MAX_CHARS = 7000
+```
 
-For inquiries, please contact:
-- Kuo Liang: cora.liang1116@outlook.com
-- Hanzhang Qin: hzgin@nus.edu.sg
-- Ruihao Zhu: ruihao.zhu@cornell.edu
+The Orchestrator performs:
+
+1. Deterministic code check via `deterministic_code_check`.
+2. LLM mathematical model review via `orchestrator_review_model`.
+3. LLM Gurobi code review via `orchestrator_review_code`.
+4. At most one refinement:
+   - If the model has blocking flaws, call `refine_model_with_feedback`, then regenerate code with `get_code`.
+   - If the model passes but code fails, call `refine_code_with_feedback`.
+5. Final deterministic and LLM review after refinement.
+
+The review output is normalized into a Python dict with:
+
+```python
+{
+    "status": "PASS" | "NEEDS_REFINEMENT" | "FAILED",
+    "critical_flaws": [],
+    "major_flaws": [],
+    "minor_flaws": [],
+    "recommended_action": "none" | "refine_model" | "refine_code",
+    "confidence": "Low" | "Medium" | "High"
+}
+```
+
+## Deterministic Code Check
+
+`deterministic_code_check`:
+
+- Extracts a fenced Python block if present.
+- Accepts raw code if it contains `gp.Model`, `gurobipy`, or `from gurobipy`.
+- Runs `ast.parse` for syntax checking.
+- Executes the generated code when `ORCH_ENABLE_CODE_EXECUTION = True`.
+- Searches the execution environment for a `gurobipy.Model`.
+- Optimizes the model if it is still in `GRB.LOADED`.
+- Records model status and objective value when optimal.
+
+This execution path uses Python `exec` and should only be used for trusted local experiment outputs.
+
+## Output CSV
+
+The Large-Scale-OR run writes:
+
+```text
+Large-scale-or-Lean-Ollama-20b-orchestrated.csv
+```
+
+Columns:
+
+- `Query`
+- `model_output_initial`
+- `code_output_initial`
+- `model_output_final`
+- `code_output_final`
+- `orchestrator_status`
+- `orchestrator_report`
+- `classification`
+
+`orchestrator_report` is JSON text containing per-iteration model review, code review, deterministic check, and refinement count.
+
+## Running The Pipeline
+
+Recommended path:
+
+```bash
+cd "/Users/alanyu/Documents/CUHK/DOTE 6635/Project/lean-llm-opt-main"
+./run_pure_ollama_large_scale.sh
+```
+
+Skip dependency installation if the Python environment is already ready:
+
+```bash
+SKIP_PIP_INSTALL=1 ./run_pure_ollama_large_scale.sh
+```
+
+Override models:
+
+```bash
+OLLAMA_LLM_MODEL=gpt-oss:20b \
+OLLAMA_EMBED_MODEL=embeddinggemma \
+./run_pure_ollama_large_scale.sh
+```
+
+The script will:
+
+1. Check/install/start Ollama.
+2. Pull the Ollama LLM and embedding models.
+3. Install `requirements.txt` unless `SKIP_PIP_INSTALL=1`.
+4. Create a run-only notebook ending at the Large-Scale-OR execution cell.
+5. Execute the notebook with `jupyter nbconvert`.
+
+## Static Tests
+
+Run notebook and shell static checks:
+
+```bash
+cd "/Users/alanyu/Documents/CUHK/DOTE 6635/Project/lean-llm-opt-main"
+
+python3 -Werror::SyntaxWarning - <<'PY'
+import json
+from pathlib import Path
+
+for p in sorted(Path(".").rglob("*.ipynb")):
+    nb = json.loads(p.read_text())
+    for i, cell in enumerate(nb.get("cells", []), 1):
+        if cell.get("cell_type") == "code":
+            compile("".join(cell.get("source", [])), f"{p}:cell-{i}", "exec")
+print("all notebooks strict compile OK")
+PY
+
+bash -n run_pure_ollama_large_scale.sh
+```
+
+Check that the pure Ollama notebook has no OpenAI runtime dependency:
+
+```bash
+rg -n "OpenAIEmbeddings|ChatOpenAI|openai_api_key|user_api_key|import openai|openai\\.|classify_problem\\s*=\\s*llm1" \
+  LEAN_LLM_OPT_pure_ollama_Large-scale-or.ipynb \
+  run_pure_ollama_large_scale.sh
+```
+
+Expected result: no matches.
+
+## Smoke Test
+
+For a fast smoke test, temporarily run only the first two rows:
+
+```python
+test = pd.read_csv("Test_Dataset/Large-scale-or/Large-scale-or-101.csv").head(2)
+(
+    model_output_initial,
+    code_output_initial,
+    model_output_final,
+    code_output_final,
+    orchestrator_status,
+    orchestrator_report,
+    classification,
+) = run_test(test, classify_problem, return_orchestrator_details=True)
+```
+
+Expected checks:
+
+- Ollama responds for both generation and embedding.
+- FAISS indexes are built.
+- `run_test` returns lists with the same length as `test`.
+- `orchestrator_status` contains only `PASS`, `NEEDS_REFINEMENT`, or `FAILED`.
+- `orchestrator_report` is valid JSON text.
+
+## Branch Tests
+
+To cover major branches, select one row from each problem class when available:
+
+- NRM
+- RA
+- TP
+- FLP/UFLP
+- AP
+- Others with CSV
+- Others without CSV
+
+For each branch, confirm:
+
+- The selected class routes to the expected `get_*_response` function.
+- Initial model/code fields are populated.
+- Final model/code fields are populated.
+- The Orchestrator report contains at least one history entry.
+
+## Targeted Orchestrator Tests
+
+Test syntax-error code refinement:
+
+```python
+bad_code = "import gurobipy as gp\nm = gp.Model('x'\nm.optimize()"
+result = orchestrate_generation(
+    query="Maximize x subject to x <= 1.",
+    selected_problem="Others without CSV",
+    model_output="Maximize x subject to x <= 1, x >= 0.",
+    code_output=bad_code,
+)
+print(result["status"])
+print(result["report"])
+```
+
+Test model review on a deliberately incomplete model:
+
+```python
+review = orchestrator_review_model(
+    query="Maximize profit with capacity limit 10 and demand limit 5.",
+    selected_problem="Resource Allocation",
+    model_output="Maximize profit.",
+)
+print(review)
+```
+
+## Full Run Evaluation
+
+After running all 101 Large-Scale-OR instances, compare:
+
+- `orchestrator_status` distribution.
+- Gurobi executable rate from `deterministic_code_check` reports.
+- Objective values in reports where available.
+- Runtime before and after adding Orchestrator.
+- Difference between `code_output_initial` and `code_output_final`.
+
+## Requirements
+
+The Orchestrator layer itself only adds standard-library imports: `ast`, `contextlib`, and `json`.
+
+No new Python package is required beyond the existing pure Ollama notebook dependencies already present in `requirements.txt`, including:
+
+- `langchain-ollama`
+- `langchain-community`
+- `langchain-classic`
+- `langchain-core`
+- `faiss-cpu`
+- `gurobipy`
+- `pandas`
+- `numpy`
+- `jupyter`
+- `nbconvert`
+
+Ollama itself is a system dependency, not a Python package. The run script handles installation/startup where possible.
